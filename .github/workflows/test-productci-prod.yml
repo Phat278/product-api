@@ -1,0 +1,168 @@
+name: Product API CI with MongoDB
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  integration-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    services:
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand(\"ping\").ok'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      PORT: 3000
+      MONGODB_URI: mongodb://127.0.0.1:27017/product_api_test
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Start API and test CRUD
+        shell: bash
+        run: |
+          set -e
+
+          node src/server.js > api.log 2>&1 &
+          API_PID=$!
+          trap 'kill "$API_PID" 2>/dev/null || true' EXIT
+
+          for attempt in {1..30}; do
+            if curl --silent --fail http://127.0.0.1:3000/api/products > /dev/null; then
+              echo "Product API is ready"
+              break
+            fi
+
+            if [ "$attempt" -eq 30 ]; then
+              echo "Product API did not start. Server log:"
+              cat api.log
+              exit 1
+            fi
+
+            sleep 2
+          done
+
+          node <<'NODE'
+          const baseUrl = "http://127.0.0.1:3000/api/products";
+
+          async function request(method, path = "", body) {
+            const response = await fetch(`${baseUrl}${path}`, {
+              method,
+              headers: body ? { "Content-Type": "application/json" } : {},
+              body: body ? JSON.stringify(body) : undefined,
+            });
+
+            const text = await response.text();
+            let data = null;
+
+            if (text) {
+              try {
+                data = JSON.parse(text);
+              } catch {
+                data = text;
+              }
+            }
+
+            return { status: response.status, data };
+          }
+
+          function productFrom(data) {
+            return data?.product ?? data?.data?.product ?? data?.data ?? data;
+          }
+
+          function assert(condition, message) {
+            if (!condition) {
+              throw new Error(message);
+            }
+          }
+
+          (async () => {
+            const list = await request("GET");
+            assert(list.status === 200, `GET products failed: HTTP ${list.status}`);
+            console.log("PASS: read product list");
+
+            const newProduct = {
+              pid: Date.now(),
+              pname: "CI integration test product",
+              price: 123.45,
+              quantity: 7,
+            };
+
+            const created = await request("POST", "", newProduct);
+            assert(
+              created.status === 200 || created.status === 201,
+              `Create product failed: HTTP ${created.status}`
+            );
+
+            const createdProduct = productFrom(created.data);
+            const pid = createdProduct?.pid ?? newProduct.pid;
+
+            assert(
+              Number.isFinite(Number(pid)),
+              "Create response did not contain a numeric pid"
+            );
+            console.log("PASS: create product");
+
+            const detailPath = `/${encodeURIComponent(pid)}`;
+
+            const readOne = await request("GET", detailPath);
+            assert(readOne.status === 200, `Read product failed: HTTP ${readOne.status}`);
+            console.log("PASS: read one product");
+
+            const updatedProduct = {
+              ...newProduct,
+              pname: "CI updated product",
+              price: 456.78,
+              quantity: 12,
+            };
+
+            const updated = await request("PUT", detailPath, updatedProduct);
+            assert(updated.status === 200, `Update product failed: HTTP ${updated.status}`);
+
+            const verifyUpdate = await request("GET", detailPath);
+            assert(verifyUpdate.status === 200, "Could not read updated product");
+            assert(
+              productFrom(verifyUpdate.data)?.pname === "CI updated product",
+              "Updated product name was not saved"
+            );
+            console.log("PASS: update product");
+
+            const deleted = await request("DELETE", detailPath);
+            assert(
+              deleted.status === 200 || deleted.status === 204,
+              `Delete product failed: HTTP ${deleted.status}`
+            );
+
+            const verifyDelete = await request("GET", detailPath);
+            assert(verifyDelete.status === 404, "Deleted product still exists");
+            console.log("PASS: delete product");
+
+            console.log("All CRUD integration checks passed.");
+          })().catch((error) => {
+            console.error(error);
+            process.exitCode = 1;
+          });
+          NODE

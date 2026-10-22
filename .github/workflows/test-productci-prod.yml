@@ -1,4 +1,4 @@
-name: Product API CI with MongoDB
+name: Product API CI with MongoDB and Docker Hub CD
 
 on:
   push:
@@ -101,7 +101,10 @@ jobs:
 
           (async () => {
             const list = await request("GET");
-            assert(list.status === 200, `GET products failed: HTTP ${list.status}`);
+            assert(
+              list.status === 200,
+              `GET products failed: HTTP ${list.status}`
+            );
             console.log("PASS: read product list");
 
             const newProduct = {
@@ -129,7 +132,10 @@ jobs:
             const detailPath = `/${encodeURIComponent(pid)}`;
 
             const readOne = await request("GET", detailPath);
-            assert(readOne.status === 200, `Read product failed: HTTP ${readOne.status}`);
+            assert(
+              readOne.status === 200,
+              `Read product failed: HTTP ${readOne.status}`
+            );
             console.log("PASS: read one product");
 
             const updatedProduct = {
@@ -140,10 +146,16 @@ jobs:
             };
 
             const updated = await request("PUT", detailPath, updatedProduct);
-            assert(updated.status === 200, `Update product failed: HTTP ${updated.status}`);
+            assert(
+              updated.status === 200,
+              `Update product failed: HTTP ${updated.status}`
+            );
 
             const verifyUpdate = await request("GET", detailPath);
-            assert(verifyUpdate.status === 200, "Could not read updated product");
+            assert(
+              verifyUpdate.status === 200,
+              "Could not read updated product"
+            );
             assert(
               productFrom(verifyUpdate.data)?.pname === "CI updated product",
               "Updated product name was not saved"
@@ -157,7 +169,10 @@ jobs:
             );
 
             const verifyDelete = await request("GET", detailPath);
-            assert(verifyDelete.status === 404, "Deleted product still exists");
+            assert(
+              verifyDelete.status === 404,
+              "Deleted product still exists"
+            );
             console.log("PASS: delete product");
 
             console.log("All CRUD integration checks passed.");
@@ -166,3 +181,34 @@ jobs:
             process.exitCode = 1;
           });
           NODE
+
+  publish-image:
+    needs: integration-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            phat278/product-api:latest
+            phat278/product-api:${{ github.sha }}

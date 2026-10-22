@@ -1,0 +1,27 @@
+services:
+  mongodb-prod:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo_prod_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  product-api-prod:
+    image: phat278/product-api:latest
+    pull_policy: always
+    restart: unless-stopped
+    depends_on:
+      mongodb-prod:
+        condition: service_healthy
+    ports:
+      - "3001:3000"
+    environment:
+      PORT: "3000"
+      MONGODB_URI: mongodb://mongodb-prod:27017/product_api
+
+volumes:
+  mongo_prod_data:
